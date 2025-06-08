@@ -6,9 +6,8 @@
 #include <stdbool.h>
 
 bool is_retroid_pocketmini(void);
-
-bool is_retroid_pocketmini(void);
 bool is_retroid_pocketmini_v2(void);
+bool is_retroid_pocketflip2(void);
 
 #if IS_ENABLED(CONFIG_EFI_HAVE_CAPSULE_SUPPORT)
 void qcom_configure_capsule_updates(void);
