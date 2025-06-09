@@ -77,9 +77,31 @@ bool is_retroid_pocketflip2(void) {
   return (memcmp(calculated_md5, expected_md5, 16) == 0);
 }
 
+/*
+ * Generate a unique phandle by scanning the device tree for the highest used phandle.
+ *
+ * @fdt: Pointer to the device tree blob.
+ * Return: A unique phandle number guaranteed to be greater than any existing phandle.
+ */
+uint32_t fdt_generate_unique_phandle(const void *fdt)
+{
+  int node;
+  uint32_t max_phandle = 0;
+
+  // Iterate over all nodes in the device tree
+  for (node = fdt_next_node(fdt, -1, NULL); node >= 0; node = fdt_next_node(fdt, node, NULL)) {
+    uint32_t phandle = fdt_get_phandle(fdt, node);
+    if (phandle > max_phandle)
+      max_phandle = phandle;
+  }
+
+  // Return one higher than the max found to guarantee uniqueness
+  return max_phandle + 1;
+}
+
 static int fixup_retroid_fdt(void *blob)
 {
-	int nodeoff;
+	int nodeoff, node, subnode;
 	int ret;
 	efi_status_t efi_ret;
 
@@ -134,6 +156,91 @@ static int fixup_retroid_fdt(void *blob)
       if (ret < 0) {
         printf("ERROR: Failed to modify panel properties\n");
         return -1;
+      }
+    }
+
+    /* Add /gpio-keys-lid node */
+    node = fdt_add_subnode(blob, 0, "/gpio-keys-lid");
+    if (node < 0) {
+      printf("ERROR: Failed to add /gpio-keys-lid node\n");
+      return node;
+    }
+
+    ret = fdt_setprop_string(blob, node, "compatible", "gpio-keys");
+    ret |= fdt_setprop_string(blob, node, "pinctrl-names", "default");
+    if (ret < 0) {
+      printf("ERROR: Failed to set gpio-keys-lid properties\n");
+      return -1;
+    }
+
+    uint32_t new_phandle = fdt_generate_unique_phandle(blob);
+    uint32_t new_phandle_be = cpu_to_fdt32(new_phandle);
+    ret = fdt_setprop(blob, node, "pinctrl-0", &new_phandle_be, sizeof(new_phandle_be));
+    if (ret < 0) {
+      printf("ERROR: Failed to set pinctrl-0 placeholder\n");
+      return -1;
+    }
+
+    /* Add hall-sensor subnode */
+    subnode = fdt_add_subnode(blob, node, "hall-sensor");
+    if (subnode < 0) {
+      printf("ERROR: Failed to add hall-sensor subnode\n");
+      return subnode;
+    }
+
+    int tlmm_node = fdt_path_offset(blob, "/soc@0/pinctrl@f100000");
+    if (tlmm_node < 0) {
+      printf("ERROR: Could not find tlmm node\n");
+      return -1;
+    }
+    uint32_t tlmm_phandle = fdt_get_phandle(blob, tlmm_node);
+    if (!tlmm_phandle) {
+      // If phandle not already set, generate and assign one
+      tlmm_phandle = fdt_generate_unique_phandle(blob);
+      fdt_set_phandle(blob, tlmm_node, tlmm_phandle);
+    }
+
+    uint32_t gpio[3] = {
+      cpu_to_fdt32(tlmm_phandle), // phandle placeholder
+      cpu_to_fdt32(123),          // GPIO number
+      cpu_to_fdt32(1)             // GPIO_ACTIVE_LOW
+    };
+
+    ret = fdt_setprop_string(blob, subnode, "label", "Hall Sensor");
+    ret |= fdt_setprop(blob, subnode, "gpios", gpio, sizeof(gpio));
+    ret |= fdt_setprop(blob, subnode, "linux,can-disable", NULL, 0);
+    ret |= fdt_setprop_u32(blob, subnode, "linux,code", SW_LID);
+    ret |= fdt_setprop_u32(blob, subnode, "linux,input-type", EV_SW);
+    ret |= fdt_setprop(blob, subnode, "wakeup-source", NULL, 0);
+    if (ret < 0) {
+      printf("ERROR: Failed to set hall-sensor properties\n");
+      return -1;
+    }
+
+    /* Enable regulator-always-on for ldo8 */
+    node = fdt_path_offset(blob, "/soc@0/rsc@18200000/regulators-1/ldo8");
+    if (node >= 0) {
+      ret = fdt_setprop(blob, node, "regulator-always-on", NULL, 0);
+      if (ret < 0) {
+        printf("ERROR: Failed to set regulator-always-on for ldo8\n");
+        return -1;
+      }
+    }
+
+    /* Add hall_sensor_default state to tlmm */
+    node = fdt_path_offset(blob, "/soc@0/pinctrl@f100000");
+    if (node >= 0) {
+      subnode = fdt_add_subnode(blob, node, "hall-sensor-default-state");
+      if (subnode >= 0) {
+        ret = fdt_set_phandle(blob, subnode, new_phandle);
+        ret |= fdt_setprop_string(blob, subnode, "pins", "gpio123");
+        ret |= fdt_setprop_string(blob, subnode, "function", "gpio");
+        ret |= fdt_setprop_u32(blob, subnode, "drive-strength", 2);
+        ret |= fdt_setprop(blob, subnode, "bias-disable", NULL, 0);
+        if (ret < 0) {
+          printf("ERROR: Failed to set hall-sensor-default-state properties\n");
+          return -1;
+        }
       }
     }
 
